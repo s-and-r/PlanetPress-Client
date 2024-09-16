@@ -1,10 +1,14 @@
-﻿using System.Web;
+﻿using System.ComponentModel.DataAnnotations;
+using System.Web;
 
 namespace Ppress_Lib.Services
 {
-
+    /// <summary>
+    /// Manager class for DataMapping service
+    /// </summary>
     public class OLDataMapping : OLClientServiceBase
     {
+        // Events
         public event OLEvents.SendEventHandler? Onsend;
         public event OLEvents.ProgressEventHandler? Onprogress;
 
@@ -14,52 +18,93 @@ namespace Ppress_Lib.Services
         {
         }
 
-        private OLDataMapping() : base(null, null)  { }
+        private OLDataMapping() : base(null, null) { }
 
 
-        public async Task<int> Process(string dataFile, string fileMapper, bool validate = false,
+
+        /// <summary>
+        /// Process Mapping from name of Mapping and Datafile
+        /// If files exists localy then we upload them to server
+        /// </summary>
+        /// <param name="dmConfigPath"></param>
+        /// <param name="dataFilePath"></param>
+        /// <param name="validate"></param>
+        /// <param name="processEvent"></param>
+        /// <param name="progressEvent"></param>
+        /// <returns></returns>
+        /// <exception cref="ArgumentException"></exception>
+        public async Task<long> Process(string dmConfigPath, string dataFilePath, bool validate = false,
             OLEvents.SendEventHandler? processEvent = null,
             OLEvents.ProgressEventHandler? progressEvent = null)
         {
+            // Id or name of the mapping config on the server
+            string dmConfig;
+            // Id or name of the datafile on the server
+            string dataFile;
+
+            // Result dataSetId
+            long dataSetId;
+
             EnsureSessionActive();
 
-            if (string.IsNullOrEmpty(dataFile) || string.IsNullOrEmpty(fileMapper))
-                throw new ArgumentException("DataMiningProcess: Bad arguments");
-
+            // Link events
             if (processEvent != null) Onsend += processEvent;
             if (progressEvent != null) Onprogress += progressEvent;
+
+            if (string.IsNullOrEmpty(dmConfigPath) || string.IsNullOrEmpty(dataFilePath))
+                throw new ArgumentException("DataMiningProcess: Bad arguments");
             
-            int _dataSetId;
-            
-            using (HttpClient http = client.GetHttpClientInstance())
+            // If Mapping config file exists localy upload it.
+            if (File.Exists(dmConfigPath)) 
+                dmConfig = (await client.Services.FileStore.UploadFileAsync(dmConfigPath)).ToString();
+            else
+                // File on  server
+                dmConfig = dmConfigPath;
+
+            if (File.Exists(dataFilePath))
+                dataFile = (await client.Services.FileStore.UploadFileAsync(dataFilePath)).ToString();
+            else
+                // File on  server
+                dataFile = dataFilePath;
+
+            using (HttpClient httpClient = client.GetHttpClientInstance())
             {
-                string _operationId = await SubmitAsync(http, dataFile, fileMapper, validate);
+                string _operationId = await SubmitAsync(httpClient, dmConfig, dataFile, validate);
 
-                await GetProgressAsync(http, _operationId);
+                await GetProgressAsync(httpClient, _operationId);
 
-                _dataSetId = await GetResultAsync(http, _operationId);
-
+                dataSetId = await GetResultAsync(httpClient, _operationId);
             }
 
-
+            // Set Events hooks
             if (processEvent != null) this.Onsend -= processEvent;
             if (progressEvent != null) Onprogress -= progressEvent;
 
-            return _dataSetId;
-
+            return dataSetId;
 
         }
 
-        private async Task<string> SubmitAsync(HttpClient http, string dataFile, string fileMapper, bool validate = false)
+        /// <summary>
+        /// Submit datamining
+        /// </summary>
+        /// <param name="httpClient"></param>
+        /// <param name="dmConfig">Id or name of DataMapping configuration</param>
+        /// <param name="dataFile">Id or name of Data file </param>
+        /// <param name="validate"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        private async Task<string> SubmitAsync(HttpClient httpClient, string dmConfig, string dataFile, bool validate = false)
         {
-            string _dataFile = HttpUtility.UrlEncode(dataFile);
-            string _fileMapper = HttpUtility.UrlEncode(fileMapper);
+            dataFile = HttpUtility.UrlEncode(dataFile.ToString());
+            dmConfig = HttpUtility.UrlEncode(dmConfig.ToString());
+
+            // Result 
             string operationId;
 
             try
             {
-                HttpResponseMessage resp = await http.PostAsync($"{serviceUrl}{_fileMapper}/{_dataFile}", null);
-                if (!resp.IsSuccessStatusCode) 
+                HttpResponseMessage resp = await httpClient.PostAsync($"{serviceUrl}{dmConfig}/{dataFile}", null);
+                if (!resp.IsSuccessStatusCode)
                     throw new Exception("DataMining can't process this action.");
                 if (!resp.Headers.TryGetValues("operationId", out IEnumerable<string>? values))
                     throw new Exception("DataMining can't process this action.");
@@ -71,18 +116,23 @@ namespace Ppress_Lib.Services
             {
                 throw new Exception("unable to process DataMapping");
             }
-
         }
 
-        public async Task<int> GetResultAsync (HttpClient http,  string operationId)
+        /// <summary>
+        /// Get the result of an operation
+        /// </summary>
+        /// <param name="httpClient"></param>
+        /// <param name="operationId"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<long> GetResultAsync(HttpClient httpClient, string operationId)
         {
-
             try
             {
-                HttpResponseMessage resp = await http.PostAsync($"{serviceUrl}getResult/{operationId}", null);
+                HttpResponseMessage resp = await httpClient.PostAsync($"{serviceUrl}getResult/{operationId}", null);
                 if (!resp.IsSuccessStatusCode)
                     throw new Exception("DataMining is unable to get result");
-                return int.Parse(await resp.Content.ReadAsStringAsync());
+                return long.Parse(await resp.Content.ReadAsStringAsync());
             }
             catch (Exception)
             {
@@ -90,7 +140,14 @@ namespace Ppress_Lib.Services
             }
         }
 
-        public async Task<bool> GetProgressAsync (HttpClient http,  string operationId)
+        /// <summary>
+        /// Get the process of an operation
+        /// </summary>
+        /// <param name="httpClient"></param>
+        /// <param name="operationId"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> GetProgressAsync(HttpClient httpClient, string operationId)
         {
             int retry = 0;
             bool done = false;
@@ -99,7 +156,7 @@ namespace Ppress_Lib.Services
             {
                 try
                 {
-                    HttpResponseMessage resp = await http.GetAsync($"{serviceUrl}getProgress/{operationId}");
+                    HttpResponseMessage resp = await httpClient.GetAsync($"{serviceUrl}getProgress/{operationId}");
                     if (!resp.IsSuccessStatusCode)
                         throw new Exception("DataMining is unable to get progress");
                     string rs = await resp.Content.ReadAsStringAsync();
@@ -114,8 +171,10 @@ namespace Ppress_Lib.Services
                 catch (Exception)
                 {
                     throw new Exception("DataMining is unable to get progress");
-                }                
+                }
                 retry++;
+
+                // Pause since the next progress query.
                 Thread.Sleep(1000);
             }
             return false;

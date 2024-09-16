@@ -1,94 +1,103 @@
 ﻿using System.Collections.Specialized;
-using System.Text;
+using System.Net.Http.Headers;
 using System.Web;
 
 namespace Ppress_Lib.Services
 {
+    /// <summary>
+    /// Manager class for service FileStore
+    /// </summary>
     public class OLFileStore : OLClientServiceBase
     {
+        // Set of files uploaded we want to delete of the cache on cleanup.
+        private readonly ISet<long> uploadedFiles = new HashSet<long>();
+
+        /// <summary>
+        /// Constructor
+        /// </summary>
+        /// <param name="client"></param>
         public OLFileStore(OLClient client)
             : base("filestore", client)
         {
         }
 
         /// <summary>
-        /// Upload data file to FileStore
+        /// Upload arbitrary file to FileStore
         /// </summary>
-        /// <param name="filename"></param>
+        /// <param name="path">Full path of the file</param>
+        /// <param name="cache">Include file or not during cleanup ?</param>
         /// <param name="persistent"></param>
-        /// <param name="named"></param>
-        /// <returns>The ID of file</returns>
-        /// <exception cref="FileNotFoundException"></exception>
+        /// <returns>The Id of file in the FileStore</returns>
+        /// <exception cref="FileNotFoundException">Unable to find file</exception>
         /// <exception cref="Exception"></exception>
-        public async Task<int> UploadDataFileAsync(string filename, bool persistent = false, bool named = false)
+        public async Task<long> UploadFileAsync(string path, bool cache = false, bool persistent = false)
         {
-            if (!File.Exists(filename))
-                throw new FileNotFoundException(filename);
-
             EnsureSessionActive();
-            FileInfo fileInfo = new(filename);
 
-            UriBuilder uriBuilder = new($"{serviceUrl}DataFile");
+            String urlPath, mimeType, extension;
+            try
+            {
+                extension = new FileInfo(path).Extension;
+            } catch (FileNotFoundException e) {
+                throw e;
+            }
+
+            switch (extension)
+            {
+                case ".OL-template":
+                    urlPath = "template";
+                    mimeType = "application/zip";
+                    break;
+                case ".OL-jobpreset":
+                    urlPath = "JobCreationConfig";
+                    mimeType = "application/xml";
+                    break;
+                case ".OL-outputpreset":
+                    urlPath = "OutputCreationConfig";
+                    mimeType = "application/xml";
+                    break;
+                case ".OL-datamapper":
+                    urlPath = "DataMiningConfig";
+                    mimeType = "application/octet-stream";
+                    break;
+                default:
+                    urlPath = "DataFile";
+                    mimeType = "application/octet-stream";
+                    break;
+            }
+
+            UriBuilder uriBuilder = new($"{serviceUrl}{urlPath}");
             NameValueCollection query = HttpUtility.ParseQueryString(uriBuilder.Query);
-            if (persistent) query.Add("persisent", persistent.ToString());
-            if (named) query.Add("filename", fileInfo.Name);
+            if (persistent) query.Add("persistent", persistent.ToString());
             uriBuilder.Query = query.ToString();
-            using HttpClient http = client.GetHttpClientInstance();
-            using HttpRequestMessage req = new();
-            req.Headers.Add("processData", "false");
+            using HttpClient httpClient = client.GetHttpClientInstance();
 
             try
             {
-                StringContent content = new(await File.ReadAllTextAsync(filename),
-                    Encoding.UTF8, "application/octet-stream");
-                using HttpResponseMessage resp = await http.PostAsync(uriBuilder.ToString(), content);
-                string buffer1 = resp.Content.ReadAsStringAsync().Result;
-                return int.Parse(resp.EnsureSuccessStatusCode().Content.ReadAsStringAsync().Result);
+                StreamContent content = new(File.OpenRead(path));
+                content.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
+                using HttpResponseMessage resp = await httpClient.PostAsync(uriBuilder.ToString(), content);
+                long id = long.Parse(resp.EnsureSuccessStatusCode().Content.ReadAsStringAsync().Result);
+    
+                // Don't include in the cleanup set if we wan't to keep in server cache
+                if (!cache)
+                    uploadedFiles.Add(id);
+
+                return id;
             }
             catch (HttpRequestException)
             {
                 throw new Exception("Unable to upload file to server");
             }
-
         }
 
         /// <summary>
-        /// Upload data stream to FileStore
+        /// Delete file in FileStore by fileId
         /// </summary>
-        /// <param name="stream"></param>
-        /// <param name="persistent"></param>
-        /// <param name="named"></param>
-        /// <returns>The ID of file</returns>
-        /// <exception cref="FileNotFoundException"></exception>
+        /// <param name="fileId"></param>
+        /// <returns></returns>
         /// <exception cref="Exception"></exception>
-        public async Task<int> UploadDataStreamAsync(Stream stream, bool persistent = false)
-        {
-
-            EnsureSessionActive();
-
-            UriBuilder uriBuilder = new($"{serviceUrl}DataFile");
-            NameValueCollection query = HttpUtility.ParseQueryString(uriBuilder.Query);
-            if (persistent) query.Add("persisent", persistent.ToString());
-            uriBuilder.Query = query.ToString();
-            using HttpClient http = client.GetHttpClientInstance();
-            using HttpRequestMessage req = new();
-            req.Headers.Add("processData", "false");
-
-            try
-            {
-                StreamContent content = new(stream);
-                using HttpResponseMessage resp = await http.PostAsync(uriBuilder.ToString(), content);
-                string buffer1 = resp.Content.ReadAsStringAsync().Result;
-                return int.Parse(resp.EnsureSuccessStatusCode().Content.ReadAsStringAsync().Result);
-            }
-            catch (HttpRequestException)
-            {
-                throw new Exception("Unable to upload file to server");
-            }
-
-        }
-
-        public async Task<bool> DeleteFileAsync(int fileId)
+        public async Task<bool> DeleteFileAsync(long fileId)
         {
             EnsureSessionActive();
             using HttpClient http = client.GetHttpClientInstance($"{serviceUrl}delete/{fileId}");
@@ -104,6 +113,27 @@ namespace Ppress_Lib.Services
             }
         }
 
+        /// <summary>
+        /// Cleanup uploaded files that not stay in cache
+        /// </summary>
+        public async void Cleanup()
+        {
+            try
+            {
+                foreach (long id in uploadedFiles)
+                {
+                    await DeleteFileAsync(id);
+                }
+            }
+            finally
+            {
+                uploadedFiles.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Disable default constructor
+        /// </summary>
         private OLFileStore() : base(null, null)
         {
 

@@ -14,14 +14,21 @@
         private OLOutputCreation() : base(null, null)  { }
 
 
-        public async Task<bool> Process(int jobSetId, string outputPreset, Stream streamResult,
+        public async Task<bool> Process(string outputPresetPath, long jobSetId, Stream streamResult,
             OLEvents.SendEventHandler? processEvent = null,
             OLEvents.ProgressEventHandler? progressEvent = null)
         {
             EnsureSessionActive();
 
-            if ((jobSetId == 0) || string.IsNullOrEmpty(outputPreset))
-                throw new ArgumentException("OutputCreation Process: Bad arguments");
+            if (jobSetId <= 0 || string.IsNullOrEmpty(outputPresetPath))
+                throw new ArgumentException("JobCreation Process: Bad arguments");
+
+            string outputPreset;
+
+            if (File.Exists(outputPresetPath))
+                outputPreset = (await client.Services.FileStore.UploadFileAsync(outputPresetPath)).ToString();
+            else
+                outputPreset = outputPresetPath;
 
             if (processEvent != null) Onsend += processEvent;
             if (progressEvent != null) Onprogress += progressEvent;
@@ -30,12 +37,11 @@
             
             using (HttpClient http = client.GetHttpClientInstance())
             {
-                string _operationId = await SubmitAsync(http, jobSetId, outputPreset);
+                string _operationId = await SubmitAsync(http, outputPreset, jobSetId);
 
                 await GetProgressAsync(http, _operationId);
 
                 _result = await GetResultAsync(http, _operationId, streamResult);
-
             }
 
 
@@ -43,17 +49,15 @@
             if (progressEvent != null) Onprogress -= progressEvent;
 
             return true;
-
-
         }
 
-        private async Task<string> SubmitAsync(HttpClient http, int jobSetId, string outputPreset)
+        private async Task<string> SubmitAsync(HttpClient http, string outputPresetId, long jobSetId)
         {
             string operationId;
 
             try
             {
-                HttpResponseMessage resp = await http.PostAsync($"{serviceUrl}{outputPreset}/{jobSetId}", null);
+                HttpResponseMessage resp = await http.PostAsync($"{serviceUrl}{outputPresetId}/{jobSetId}", null);
                 if (!resp.IsSuccessStatusCode) 
                     throw new Exception("OutputCreation can't process this action.");
                 if (!resp.Headers.TryGetValues("operationId", out IEnumerable<string>? values))
@@ -66,12 +70,10 @@
             {
                 throw new Exception("unable to process OutputCreation");
             }
-
         }
 
-        public async Task<string> GetResultAsync (HttpClient http,  string operationId, Stream streamResult)
+        public async Task<string> GetResultAsync (HttpClient http, string operationId, Stream streamResult)
         {
-
             try
             {
                 HttpResponseMessage resp = await http.PostAsync($"{serviceUrl}getResult/{operationId}", null);
@@ -82,7 +84,6 @@
                 {
                     await contentStream.CopyToAsync(streamResult);
                 }
-                
 
                 return "OK";
             }
@@ -92,7 +93,7 @@
             }
         }
 
-        public async Task<bool> GetProgressAsync (HttpClient http,  string operationId)
+        public async Task<bool> GetProgressAsync (HttpClient http, string operationId)
         {
             int retry = 0;
             bool done = false;
